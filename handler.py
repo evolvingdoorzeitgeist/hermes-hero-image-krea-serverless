@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 
 import runpod
 import torch
-from diffusers import AutoPipelineForText2Image, FluxPipeline
+from diffusers import Krea2Pipeline
 
 
 # Set this in RunPod endpoint environment variables.
@@ -27,7 +27,11 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 # Useful label returned to Hermes / Telegram.
 ENGINE_NAME = os.environ.get("ENGINE_NAME", "krea-2-turbo")
 
-_pipe = None
+_pipe = Krea2Pipeline.from_pretrained(
+    MODEL_ID,
+    torch_dtype=torch.bfloat16,
+    token=HF_TOKEN if HF_TOKEN else None,
+).to("cuda")
 
 
 ASPECT_SIZES: Dict[str, Tuple[int, int]] = {

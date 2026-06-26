@@ -8,31 +8,11 @@ import runpod
 import torch
 from diffusers import Krea2Pipeline
 
-
-# Set this in RunPod endpoint environment variables.
-# Example:
-# MODEL_ID=<KREA_2_TURBO_MODEL_ID>
-#
-# Keep this as fallback so the worker still behaves predictably.
-MODEL_ID = os.environ.get("MODEL_ID", "black-forest-labs/FLUX.1-schnell")
-
-# Options:
-# auto  = use diffusers AutoPipelineForText2Image
-# flux  = force FluxPipeline
-PIPELINE_TYPE = os.environ.get("PIPELINE_TYPE", "auto").lower()
-
-# Optional Hugging Face token for gated models.
+MODEL_ID = os.environ.get("MODEL_ID", "krea/Krea-2-Turbo")
 HF_TOKEN = os.environ.get("HF_TOKEN")
-
-# Useful label returned to Hermes / Telegram.
 ENGINE_NAME = os.environ.get("ENGINE_NAME", "krea-2-turbo")
 
-_pipe = Krea2Pipeline.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.bfloat16,
-    token=HF_TOKEN if HF_TOKEN else None,
-).to("cuda")
-
+_pipe = None
 
 ASPECT_SIZES: Dict[str, Tuple[int, int]] = {
     "16:9": (1280, 720),
@@ -44,15 +24,10 @@ ASPECT_SIZES: Dict[str, Tuple[int, int]] = {
 
 
 def get_dtype():
-    """
-    Prefer bfloat16 on modern GPUs.
-    Fall back to float16 if needed.
-    """
     dtype_name = os.environ.get("TORCH_DTYPE", "bfloat16").lower()
 
     if dtype_name == "float16":
         return torch.float16
-
     if dtype_name == "float32":
         return torch.float32
 
@@ -68,29 +43,18 @@ def get_pipe():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available. This endpoint must run on a GPU worker.")
 
-    dtype = get_dtype()
-
     load_kwargs = {
-        "torch_dtype": dtype,
+        "torch_dtype": get_dtype(),
     }
 
     if HF_TOKEN:
         load_kwargs["token"] = HF_TOKEN
 
-    if PIPELINE_TYPE == "flux":
-        _pipe = FluxPipeline.from_pretrained(
-            MODEL_ID,
-            **load_kwargs,
-        )
-    else:
-        _pipe = AutoPipelineForText2Image.from_pretrained(
-            MODEL_ID,
-            **load_kwargs,
-        )
+    _pipe = Krea2Pipeline.from_pretrained(
+        MODEL_ID,
+        **load_kwargs,
+    ).to("cuda")
 
-    _pipe.to("cuda")
-
-    # Small memory optimization where supported.
     try:
         _pipe.enable_attention_slicing()
     except Exception:
@@ -105,7 +69,6 @@ def health():
         "worker": "hermes-hero-image-krea-serverless",
         "engine": ENGINE_NAME,
         "model": MODEL_ID,
-        "pipeline_type": PIPELINE_TYPE,
         "cuda_available": torch.cuda.is_available(),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_dtype": str(get_dtype()),
@@ -118,27 +81,19 @@ def build_prompt(prompt: str, aspect_ratio: str) -> str:
     base = prompt.strip()
 
     quality_tail = (
-        " premium editorial hero image, cinematic lighting, clean composition, "
+        ", premium editorial hero image, cinematic lighting, clean composition, "
         "professional commercial-grade visual, no text, no words, no letters, "
         "no logo, no watermark"
     )
 
     if aspect_ratio == "16:9":
-        layout_tail = (
-            ", wide horizontal composition, strong focal point, negative space for headline overlay"
-        )
+        layout_tail = ", wide horizontal composition, strong focal point, negative space for headline overlay"
     elif aspect_ratio == "9:16":
-        layout_tail = (
-            ", vertical mobile composition, centered subject, top and bottom breathing room"
-        )
+        layout_tail = ", vertical mobile composition, centered subject, top and bottom breathing room"
     elif aspect_ratio == "1:1":
-        layout_tail = (
-            ", square composition, centered focal subject, balanced clean layout"
-        )
+        layout_tail = ", square composition, centered focal subject, balanced clean layout"
     elif aspect_ratio == "21:9":
-        layout_tail = (
-            ", ultra-wide cinematic masthead composition, generous negative space"
-        )
+        layout_tail = ", ultra-wide cinematic masthead composition, generous negative space"
     else:
         layout_tail = ", clean balanced editorial composition"
 
@@ -161,9 +116,9 @@ def generate(job_input):
 
     width, height = ASPECT_SIZES[aspect_ratio]
 
-    steps = int(job_input.get("steps") or os.environ.get("DEFAULT_STEPS", "4"))
+    steps = int(job_input.get("steps") or os.environ.get("DEFAULT_STEPS", "8"))
     guidance_scale = float(
-        job_input.get("guidance_scale") or os.environ.get("DEFAULT_GUIDANCE_SCALE", "0")
+        job_input.get("guidance_scale") or os.environ.get("DEFAULT_GUIDANCE_SCALE", "0.0")
     )
 
     seed = job_input.get("seed")
@@ -182,22 +137,13 @@ def generate(job_input):
         "width": width,
         "height": height,
         "num_inference_steps": steps,
+        "guidance_scale": guidance_scale,
     }
-
-    # Some models accept guidance_scale, some ignore or dislike it.
-    # Try with it first, fall back without it if needed.
-    if guidance_scale is not None:
-        call_kwargs["guidance_scale"] = guidance_scale
 
     if generator is not None:
         call_kwargs["generator"] = generator
 
-    try:
-        result = pipe(**call_kwargs)
-    except TypeError:
-        call_kwargs.pop("guidance_scale", None)
-        result = pipe(**call_kwargs)
-
+    result = pipe(**call_kwargs)
     image = result.images[0]
 
     buffer = io.BytesIO()
@@ -210,7 +156,6 @@ def generate(job_input):
         "job_id": str(uuid.uuid4()),
         "engine": ENGINE_NAME,
         "model": MODEL_ID,
-        "pipeline_type": PIPELINE_TYPE,
         "filename": filename,
         "mime_type": "image/png",
         "aspect_ratio": aspect_ratio,
@@ -248,7 +193,6 @@ def handler(job):
             "error": str(e),
             "engine": ENGINE_NAME,
             "model": MODEL_ID,
-            "pipeline_type": PIPELINE_TYPE,
         }
 
 

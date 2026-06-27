@@ -36,35 +36,61 @@ def get_dtype():
 
     return torch.bfloat16
 
-
-def get_pipe():
+def unload_pipe():
     global _pipe
 
-    if _pipe is not None:
-        return _pipe
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available. This endpoint must run on a GPU worker.")
-
-    load_kwargs = {
-        "torch_dtype": get_dtype(),
-    }
-
-    if HF_TOKEN:
-        load_kwargs["token"] = HF_TOKEN
-
-    _pipe = Krea2Pipeline.from_pretrained(
-        MODEL_ID,
-        **load_kwargs,
-    ).to("cuda")
-
     try:
-        _pipe.enable_attention_slicing()
+        if _pipe is not None:
+            del _pipe
     except Exception:
         pass
 
-    return _pipe
+    _pipe = None
 
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
+def get_pipe(force_reload: bool = False):
+    global _pipe
+
+    with _pipe_lock:
+        if force_reload:
+            unload_pipe()
+
+        if _pipe is not None:
+            return _pipe
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available. This endpoint must run on a GPU worker.")
+
+        load_kwargs = {
+            "torch_dtype": get_dtype(),
+        }
+
+        if HF_TOKEN:
+            load_kwargs["token"] = HF_TOKEN
+
+        _pipe = Krea2Pipeline.from_pretrained(
+            MODEL_ID,
+            **load_kwargs,
+        ).to("cuda")
+
+        try:
+            _pipe.enable_attention_slicing()
+        except Exception:
+            pass
+
+        return _pipe
 
 def health():
     return {
@@ -133,7 +159,7 @@ def generate(job_input):
 
     final_prompt = build_prompt(prompt, aspect_ratio)
 
-    pipe = get_pipe()
+    pipe = get_pipe(force_reload=True)
 
     call_kwargs = {
         "prompt": final_prompt,
@@ -146,8 +172,20 @@ def generate(job_input):
     if generator is not None:
         call_kwargs["generator"] = generator
 
-    result = pipe(**call_kwargs)
-    image = result.images[0]
+    try:
+        with torch.inference_mode():
+            result = pipe(**call_kwargs)
+    
+        if not getattr(result, "images", None):
+            raise RuntimeError("Krea pipeline returned no images.")
+    
+        image = result.images[0]
+    
+        if image is None:
+            raise RuntimeError("Krea pipeline returned an empty image.")
+    
+    finally:
+        unload_pipe()
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")

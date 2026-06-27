@@ -15,6 +15,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 ENGINE_NAME = os.environ.get("ENGINE_NAME", "krea-2-turbo")
 
 _pipe = None
+_pipe_lock = threading.Lock()
 
 ASPECT_SIZES: Dict[str, Tuple[int, int]] = {
     "16:9": (1280, 720),
